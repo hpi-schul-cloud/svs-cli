@@ -30,7 +30,7 @@ The server exposes these login routes under `/api/v3/authentication`:
 
 Successful login returns an access token (JWT) used as a Bearer token for API requests. Every command now uses the same token resolver: it reuses `SCHOOLCLOUD_TOKEN` while valid, otherwise logs in with `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`, or prompts for credentials when running interactively. Tokens obtained by logging in stay in process memory; the CLI does not save passwords or tokens to disk.
 
-Run `auth` to log in or inspect the current account. Passwords are prompted without echo when no password is injected. `--print-token` is available for deliberate shell scripting; it writes only the token to stdout, so treat that output as secret. The login request uses the verified `/api/v3/authentication/local` route by default. Set `SCHOOLCLOUD_AUTH_METHOD=local-service-account` for a local service account. LDAP login is also supported with `SCHOOLCLOUD_AUTH_METHOD=ldap`, `SCHOOLCLOUD_SCHOOL_ID`, and `SCHOOLCLOUD_SYSTEM_ID`. OAuth/SSO providers need their provider-specific flow and cannot be assumed to accept a username and password through this CLI login.
+Run `auth` to log in or inspect the current account. Passwords are prompted without echo when no password is injected. `--print-token` is available for deliberate shell scripting; it writes only the token to stdout, so treat that output as secret. The login request uses the verified `/api/v3/authentication/local` route by default. Set `SCHOOLCLOUD_AUTH_METHOD=local-service-account` for a local service account. LDAP login is also supported with `SCHOOLCLOUD_AUTH_METHOD=ldap`, `SCHOOLCLOUD_SCHOOL_ID`, and `SCHOOLCLOUD_SYSTEM_ID`. OAuth/SSO providers need their provider-specific flow and cannot be assumed to accept a username and password through this CLI login. School administration prefers the separate `SVS_ADMIN_TOKEN` when set; otherwise it uses the regular token resolver. The server still checks the token's permissions on every request.
 
 Copy `.env.example` to `.env` and set the values for your installation. Keep `.env` private; it is ignored by Git. Load it into the current shell before running commands:
 
@@ -61,6 +61,9 @@ python3 svs_cli.py boards --roomid ROOM_ID
 python3 svs_cli.py boards --roomid ROOM_ID --name "lesson"
 python3 svs_cli.py board create --roomid ROOM_ID --name "New board"
 python3 svs_cli.py board capabilities --boardid BOARD_ID
+python3 svs_cli.py school systems --schoolid SCHOOL_ID
+python3 svs_cli.py school system-options get --schoolid SCHOOL_ID
+python3 svs_cli.py school system-options set --schoolid SCHOOL_ID --classes enabled
 python3 svs_cli.py board create-link-card --boardid BOARD_ID --url "https://example.org/article"
 python3 svs_cli.py board create-file-card --boardid BOARD_ID --url "https://upload.wikimedia.org/.../image.jpg"
 python3 svs_cli.py board create-file-card --boardid BOARD_ID --file ./image.jpg
@@ -79,6 +82,9 @@ svs rooms
 svs boards --roomid ROOM_ID
 svs board create --roomid ROOM_ID --name "New board"
 svs board capabilities --boardid BOARD_ID
+svs school systems --schoolid SCHOOL_ID
+svs school system-options get --schoolid SCHOOL_ID
+svs school system-options set --schoolid SCHOOL_ID --classes enabled
 ```
 
 The installed command is `svs`; `svs-cli` is also provided as an alias.
@@ -102,6 +108,8 @@ done
 Each iteration creates one board through the API. The loop stops if a request fails.
 
 `board capabilities --boardid BOARD_ID` is read-only. It combines `GET /api/v3/config/public` (deployment flags), `GET /api/v3/boards/{boardId}` and `/context` (board features and current-user permissions), and, when enabled and permitted, `GET /api/v3/tools/preferred-tools?contextType=board-element` (preferred tools for the current user's school). It lists structural actions and element types with reasons when unavailable; add `--json` for machine-readable output. Preferred tools are only the school's shortcut list; an empty list does not prove that no tools can be configured through the UI's full tool picker.
+
+`school systems --schoolid SCHOOL_ID` lists the identity systems linked to a school via `GET /api/v3/school/{schoolId}/systems`. `school system-options get` reads provisioning settings with `GET /api/v3/schools/{schoolId}/systems/{systemId}/provisioning-options`. The CLI defaults `--schoolid` to the JWT's school and auto-selects the school's `moin.schule` system when unique; pass `--systemid` when needed. The UI currently exposes these options for `moin.schule`. Reading requires `SCHOOL_SYSTEM_VIEW`; writing requires `SCHOOL_SYSTEM_EDIT`, or `CAN_EXECUTE_INSTANCE_OPERATIONS` for instance administrators. Set one or more options with `--classes`, `--courses`, `--other-groups`, and `--external-tools`, each set to `enabled` or `disabled`. Updates are confirmed interactively; pass `--yes` to apply from a script. Disabling class, course, or other-group provisioning deletes existing groups of that type for the selected school/system, and the CLI warns before applying that change.
 
 `board create-content` accepts either `--boardid BOARD_ID` for an existing board, or `--roomid ROOM_ID --name "Board name"` (also `--board-name`) to create a named board and then generate content for it. A newly named board is created before planning, so it remains empty if generation fails or you decline the plan. `--json` is plan-only and therefore requires an existing `--boardid`; use the named-board mode for an interactive plan or `--yes` to apply without confirmation.
 

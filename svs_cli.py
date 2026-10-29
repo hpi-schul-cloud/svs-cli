@@ -210,6 +210,122 @@ def get_me(base_url: str, token: str) -> dict:
     return get_api_json(base_url, token, "/me")
 
 
+def get_admin_token(base_url: str, *, prompt: bool = False) -> str:
+    """Prefer an explicitly supplied elevated token for school administration."""
+    admin_token = os.environ.get("SVS_ADMIN_TOKEN", "").strip()
+    if admin_token:
+        if _jwt_is_expired(admin_token):
+            raise ValueError("SVS_ADMIN_TOKEN is expired. Supply a current admin JWT.")
+        return admin_token
+    return get_schoolcloud_token(base_url, prompt=prompt)
+
+
+def get_school_systems(base_url: str, token: str, school_id: str) -> list[dict]:
+    """List identity systems attached to a school through the v3 API."""
+    request = Request(
+        api_url(base_url, f"/school/{quote(school_id, safe='')}/systems", {}),
+        headers={
+            "Authorization": f"Bearer {token.removeprefix('Bearer ').strip()}",
+            "Accept": "application/json",
+        },
+    )
+    with urlopen(request, timeout=30) as response:
+        payload = json.load(response)
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        raise ValueError("Unexpected API response: expected a list of school systems.")
+    return payload
+
+
+SCHULCONNEX_OPTION_DEFAULTS = {
+    "groupProvisioningClassesEnabled": True,
+    "groupProvisioningCoursesEnabled": False,
+    "groupProvisioningOtherEnabled": False,
+    "schoolExternalToolProvisioningEnabled": False,
+}
+
+
+def get_school_system_options(base_url: str, token: str, school_id: str, system_id: str) -> dict:
+    """Read the SchulConneX system options for a school."""
+    return get_api_json(
+        base_url,
+        token,
+        f"/schools/{quote(school_id, safe='')}/systems/{quote(system_id, safe='')}/provisioning-options",
+    )
+
+
+def set_school_system_options(
+    base_url: str, token: str, school_id: str, system_id: str, options: dict[str, bool]
+) -> dict:
+    """Replace a school's complete set of system provisioning options."""
+    return api_json_request(
+        base_url,
+        token,
+        f"/schools/{quote(school_id, safe='')}/systems/{quote(system_id, safe='')}/provisioning-options",
+        method="POST",
+        body=options,
+    )
+
+
+def resolve_school_system(
+    base_url: str, token: str, school_id: str | None, system_id: str | None
+) -> tuple[str, dict]:
+    """Resolve a school and its single UI-supported moin.schule system."""
+    target_school_id = school_id.strip() if school_id else school_id_from_token(token)
+    systems = get_school_systems(base_url, token, target_school_id)
+    if system_id:
+        matches = [item for item in systems if str(item.get("id", "")) == system_id]
+    else:
+        matches = [item for item in systems if item.get("alias") == "moin.schule"]
+    if not matches:
+        if system_id:
+            raise ValueError(f"System {system_id} is not attached to school {target_school_id}.")
+        raise ValueError(
+            f"No moin.schule system was found for school {target_school_id}; pass --systemid to select one."
+        )
+    if len(matches) != 1:
+        raise ValueError("More than one matching system was found; pass --systemid explicitly.")
+    system = matches[0]
+    if system.get("alias") != "moin.schule":
+        raise ValueError(
+            "Provisioning options are currently exposed in the SVS UI only for the moin.schule system."
+        )
+    return target_school_id, system
+
+
+def print_school_systems(systems: list[dict], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(systems, ensure_ascii=False, indent=2))
+        return
+    if not systems:
+        print("No systems found for this school.")
+        return
+    print(f"{'ID':<25}  {'Type':<16}  Alias")
+    print(f"{'-' * 25}  {'-' * 16}  {'-' * 30}")
+    for system in systems:
+        print(f"{system.get('id', ''):<25}  {system.get('type', ''):<16}  {system.get('alias', '')}")
+
+
+def print_school_system_options(options: dict, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(options, ensure_ascii=False, indent=2))
+        return
+    labels = (
+        ("groupProvisioningClassesEnabled", "Classes"),
+        ("groupProvisioningCoursesEnabled", "Courses"),
+        ("groupProvisioningOtherEnabled", "Other groups"),
+        ("schoolExternalToolProvisioningEnabled", "School external tools"),
+    )
+    for key, label in labels:
+        value = options.get(key)
+        if not isinstance(value, bool):
+            raise ValueError(f"SchoolCloud returned an invalid value for {key}.")
+        print(f"{label:<24} {'enabled' if value else 'disabled'}")
+
+
+def _enabled_value(value: str) -> bool:
+    return value == "enabled"
+
+
 def api_json_request(
     base_url: str,
     token: str,
@@ -1947,12 +2063,47 @@ def main(argv: list[str] | None = None) -> int:
     user_search_parser.add_argument("--role", choices=("student", "teacher", "all"), default="all")
     user_search_parser.add_argument("--json", action="store_true", help="Print results as JSON")
 
+    school_parser = subparsers.add_parser("school", help="Inspect and administer a school")
+    school_commands = school_parser.add_subparsers(dest="school_command", required=True)
+    school_systems_parser = school_commands.add_parser("systems", help="List identity systems attached to a school")
+    school_systems_parser.add_argument("--schoolid", help="School ID (defaults to the JWT's school)")
+    school_systems_parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    school_options_parser = school_commands.add_parser(
+        "system-options", help="Read or update moin.schule provisioning settings"
+    )
+    school_options_commands = school_options_parser.add_subparsers(dest="school_options_command", required=True)
+    school_options_get_parser = school_options_commands.add_parser("get", help="Show current provisioning settings")
+    school_options_get_parser.add_argument("--schoolid", help="School ID (defaults to the JWT's school)")
+    school_options_get_parser.add_argument("--systemid", help="System ID (auto-detect moin.schule if unique)")
+    school_options_get_parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    school_options_set_parser = school_options_commands.add_parser("set", help="Update provisioning settings")
+    school_options_set_parser.add_argument("--schoolid", help="School ID (defaults to the JWT's school)")
+    school_options_set_parser.add_argument("--systemid", help="System ID (auto-detect moin.schule if unique)")
+    school_options_set_parser.add_argument(
+        "--classes", choices=("enabled", "disabled"), help="Enable or disable class provisioning"
+    )
+    school_options_set_parser.add_argument(
+        "--courses", choices=("enabled", "disabled"), help="Enable or disable course provisioning"
+    )
+    school_options_set_parser.add_argument(
+        "--other-groups", choices=("enabled", "disabled"), help="Enable or disable other-group provisioning"
+    )
+    school_options_set_parser.add_argument(
+        "--external-tools", choices=("enabled", "disabled"), help="Enable or disable external-tool provisioning"
+    )
+    school_options_set_parser.add_argument("--yes", action="store_true", help="Apply without interactive confirmation")
+    school_options_set_parser.add_argument("--json", action="store_true", help="Print updated settings as JSON")
+
     args = parser.parse_args(argv)
     try:
-        token = get_schoolcloud_token(
-            args.api_url,
-            username=getattr(args, "username", None),
-            prompt=True,
+        token = (
+            get_admin_token(args.api_url, prompt=True)
+            if args.command == "school"
+            else get_schoolcloud_token(
+                args.api_url,
+                username=getattr(args, "username", None),
+                prompt=True,
+            )
         )
         if args.command == "auth":
             info = get_me(args.api_url, token)
@@ -1961,6 +2112,86 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 print("Authenticated successfully.")
                 print_me(info, "table")
+        elif args.command == "school" and args.school_command == "systems":
+            school_id = args.schoolid or school_id_from_token(token)
+            systems = get_school_systems(args.api_url, token, school_id)
+            print_school_systems(systems, "json" if args.json else "table")
+        elif args.command == "school" and args.school_command == "system-options":
+            school_id, system = resolve_school_system(args.api_url, token, args.schoolid, args.systemid)
+            system_id = str(system.get("id", ""))
+            if args.school_options_command == "get":
+                options = get_school_system_options(args.api_url, token, school_id, system_id)
+                print_school_system_options(options, "json" if args.json else "table")
+            else:
+                requested = {
+                    "groupProvisioningClassesEnabled": args.classes,
+                    "groupProvisioningCoursesEnabled": args.courses,
+                    "groupProvisioningOtherEnabled": args.other_groups,
+                    "schoolExternalToolProvisioningEnabled": args.external_tools,
+                }
+                supplied = {key: value for key, value in requested.items() if value is not None}
+                if not supplied:
+                    raise ValueError("Set at least one option with --classes, --courses, --other-groups, or --external-tools.")
+                try:
+                    current = get_school_system_options(args.api_url, token, school_id, system_id)
+                except HTTPError as error:
+                    if error.code != 404:
+                        raise
+                    error.close()
+                    # These are the defaults used by the UI and the server's SchulConneX options class.
+                    current = dict(SCHULCONNEX_OPTION_DEFAULTS)
+                for key, value in current.items():
+                    if key not in SCHULCONNEX_OPTION_DEFAULTS or not isinstance(value, bool):
+                        raise ValueError(f"Unexpected provisioning option returned by the server: {key}")
+                target = dict(SCHULCONNEX_OPTION_DEFAULTS)
+                target.update(current)
+                target.update({key: _enabled_value(value) for key, value in supplied.items()})
+                if target == current:
+                    if args.json:
+                        print_school_system_options(current, "json")
+                    else:
+                        print("No changes requested; provisioning settings are already at those values.")
+                else:
+                    deleted_groups = [
+                        label
+                        for key, label in (
+                            ("groupProvisioningClassesEnabled", "classes"),
+                            ("groupProvisioningCoursesEnabled", "courses"),
+                            ("groupProvisioningOtherEnabled", "other groups"),
+                        )
+                        if current.get(key, SCHULCONNEX_OPTION_DEFAULTS[key]) and not target[key]
+                    ]
+                    if deleted_groups:
+                        print(
+                            "Warning: disabling provisioning will delete existing "
+                            + ", ".join(deleted_groups)
+                            + " groups for this school and system.",
+                            file=sys.stderr,
+                        )
+                    if not args.yes:
+                        print(f"School {school_id}, system {system_id} ({system.get('alias', '')})", file=sys.stderr)
+                        print("Current settings:", file=sys.stderr)
+                        print_school_system_options(current, "table")
+                        print("Requested settings:", file=sys.stderr)
+                        print_school_system_options(target, "table")
+                        if not sys.stdin.isatty():
+                            raise ValueError("No settings were changed. Rerun interactively or pass --yes to apply.")
+                        try:
+                            confirmed = input("Apply these school system settings? [y/N] ").strip().casefold() in ("y", "yes")
+                        except EOFError:
+                            confirmed = False
+                        if not confirmed:
+                            print("Cancelled; no settings were changed.")
+                            return 0
+                    set_school_system_options(args.api_url, token, school_id, system_id, target)
+                    verified = get_school_system_options(args.api_url, token, school_id, system_id)
+                    if any(verified.get(key) != value for key, value in target.items()):
+                        raise ValueError("Settings were submitted, but read-back verification did not match the requested values.")
+                    if args.json:
+                        print_school_system_options(verified, "json")
+                    else:
+                        print(f"Updated system options for school {school_id}, system {system_id}.")
+                        print_school_system_options(verified, "table")
         elif args.command == "me":
             info = get_me(args.api_url, token)
             print_me(info, "json" if args.json else "table")
