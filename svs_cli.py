@@ -86,6 +86,38 @@ def list_rooms(base_url: str, token: str) -> list[dict]:
     return payload["data"]
 
 
+def list_courses(base_url: str, token: str, show_progress: bool = False, page_size: int = 100) -> list[dict]:
+    """Fetch all courses visible to the authenticated user from the v3 API."""
+    bearer_token = token.removeprefix("Bearer ").strip()
+    courses: list[dict] = []
+    skip = 0
+    total: int | None = None
+    page_number = 0
+    while total is None or skip < total:
+        page_number += 1
+        if show_progress:
+            page_count = str(math.ceil(total / page_size)) if total is not None else "?"
+            loaded = f" ({len(courses):,} of {total:,} loaded)" if total is not None else ""
+            write_progress(f"Fetching courses: page {page_number} of {page_count}{loaded}...")
+        payload = get_api_json(
+            base_url,
+            bearer_token,
+            "/courses",
+            {"limit": str(page_size), "skip": str(skip)},
+        )
+        page = payload.get("data")
+        if not isinstance(page, list):
+            raise ValueError("Unexpected API response: expected an object containing a 'data' list.")
+        courses.extend(page)
+        total = payload.get("total", len(page))
+        if not page:
+            break
+        skip += len(page)
+    if show_progress:
+        write_progress(f"Fetched {len(courses):,} courses across {page_number} page(s).", end="\n")
+    return courses
+
+
 def list_room_boards(base_url: str, token: str, room_id: str) -> list[dict]:
     """List boards visible to the authenticated user in a room."""
     bearer_token = token.removeprefix("Bearer ").strip()
@@ -169,13 +201,16 @@ def get_schoolcloud_token(
     *,
     username: str | None = None,
     prompt: bool = False,
+    method_override: str | None = None,
+    force_login: bool = False,
+    token_env: str = "SCHOOLCLOUD_TOKEN",
 ) -> str:
     """Reuse a valid token, or obtain one from injected credentials / interactive login."""
-    token = os.environ.get("SCHOOLCLOUD_TOKEN", "").strip()
-    if token and not _jwt_is_expired(token):
+    token = os.environ.get(token_env, "").strip()
+    if token and not force_login and not _jwt_is_expired(token):
         return token
 
-    auth_method = os.environ.get("SCHOOLCLOUD_AUTH_METHOD", "local").strip().casefold()
+    auth_method = (method_override or os.environ.get("SCHOOLCLOUD_AUTH_METHOD", "local")).strip().casefold()
     login_username = (username or os.environ.get("SCHOOLCLOUD_USERNAME", "")).strip()
     password = os.environ.get("SCHOOLCLOUD_PASSWORD", "")
     interactive = prompt and sys.stdin.isatty()
@@ -184,13 +219,15 @@ def get_schoolcloud_token(
     if not password and interactive:
         password = getpass("SchoolCloud password: ")
     if not login_username or not password:
-        if token:
+        if token and not force_login:
             raise ValueError(
-                "SCHOOLCLOUD_TOKEN is expired or near expiry. Set SCHOOLCLOUD_USERNAME and "
+                f"{token_env} is expired or near expiry. Set SCHOOLCLOUD_USERNAME and "
                 "SCHOOLCLOUD_PASSWORD, or run interactively to log in."
             )
+        if force_login:
+            raise ValueError("This login requires SCHOOLCLOUD_USERNAME and SCHOOLCLOUD_PASSWORD, or interactive credentials.")
         raise ValueError(
-            "Set SCHOOLCLOUD_TOKEN, or provide SCHOOLCLOUD_USERNAME and SCHOOLCLOUD_PASSWORD; "
+            f"Set {token_env}, or provide SCHOOLCLOUD_USERNAME and SCHOOLCLOUD_PASSWORD; "
             "interactive commands can prompt for credentials."
         )
     school_id = os.environ.get("SCHOOLCLOUD_SCHOOL_ID", "").strip()
@@ -205,9 +242,28 @@ def get_schoolcloud_token(
     )
 
 
+def get_shd_token(base_url: str, *, prompt: bool = False) -> str:
+    """Use the dedicated SHD JWT or log in through the service-account endpoint."""
+    return get_schoolcloud_token(
+        base_url,
+        prompt=prompt,
+        method_override="local-service-account",
+        token_env="SCHOOLCLOUD_SHD_TOKEN",
+    )
+
+
 def get_me(base_url: str, token: str) -> dict:
     """Fetch the authenticated user's identity and permissions from /me."""
     return get_api_json(base_url, token, "/me")
+
+
+def require_shd_user(base_url: str, token: str) -> str:
+    """Require the JWT to belong to a superhero user before SHD-scoped v3 operations."""
+    info = get_me(base_url, token)
+    roles = info.get("roles") or []
+    if not any(isinstance(role, dict) and role.get("name") == "superhero" for role in roles):
+        raise ValueError("This SHD v3 command requires a JWT for a user with the superhero role.")
+    return token
 
 
 def get_admin_token(base_url: str, *, prompt: bool = False) -> str:
@@ -352,6 +408,153 @@ def api_json_request(
     if not isinstance(payload, dict):
         raise ValueError(f"Unexpected API response from {path}: expected a JSON object.")
     return payload
+
+
+def admin_api_url(base_url: str, path: str) -> str:
+    """Build a URL for the internal Admin API, whose version prefix is /v1."""
+    base = base_url.rstrip("/")
+    parts = urlsplit(base)
+    path_prefix = parts.path.rstrip("/")
+    if path_prefix.endswith("/admin/api/v1"):
+        prefix = path_prefix
+    elif path_prefix.endswith("/admin/api"):
+        prefix = path_prefix + "/v1"
+    else:
+        prefix = path_prefix + "/admin/api/v1"
+    return urlunsplit((parts.scheme, parts.netloc, prefix + path, "", ""))
+
+
+def admin_api_json_request(
+    base_url: str,
+    api_key: str,
+    path: str,
+    *,
+    method: str = "GET",
+    body: dict | None = None,
+    user_token: str | None = None,
+) -> dict:
+    """Send a JSON request to the internal Admin API using its API key and optional user JWT."""
+    if not api_key.strip():
+        raise ValueError("Set SCHOOLCLOUD_ADMIN_API_KEY to use SHD Admin API commands.")
+    endpoint = urlsplit(base_url)
+    if endpoint.scheme not in ("http", "https") or not endpoint.netloc:
+        raise ValueError("SVS_ADMIN_API_URL must be an absolute http:// or https:// URL.")
+    if endpoint.scheme != "https" and endpoint.hostname not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("Use HTTPS for a remote Admin API; plain HTTP is allowed only for localhost.")
+    headers = {"X-API-KEY": api_key.strip(), "Accept": "application/json"}
+    if user_token:
+        headers["Authorization"] = f"Bearer {user_token.removeprefix('Bearer ').strip()}"
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    request = Request(admin_api_url(base_url, path), data=data, headers=headers, method=method)
+    with urlopen(request, timeout=30) as response:
+        response_body = response.read()
+    if not response_body:
+        return {}
+    result = json.loads(response_body)
+    if not isinstance(result, dict):
+        raise ValueError(f"Unexpected Admin API response from {path}: expected a JSON object.")
+    return result
+
+
+def create_admin_user(
+    base_url: str,
+    api_key: str,
+    *,
+    school_id: str,
+    first_name: str,
+    last_name: str,
+    email: str,
+    role_names: list[str],
+) -> dict:
+    """Create a user and account through the internal Admin API."""
+    payload = {
+        "schoolId": school_id.strip(),
+        "firstName": first_name.strip(),
+        "lastName": last_name.strip(),
+        "email": email.strip(),
+        "roleNames": role_names,
+    }
+    if not all(payload[key] for key in ("schoolId", "firstName", "lastName", "email")):
+        raise ValueError("School ID, first name, last name, and email must not be blank.")
+    result = admin_api_json_request(base_url, api_key, "/admin/users", method="POST", body=payload)
+    if not isinstance(result, dict) or not result.get("userId"):
+        raise ValueError("Admin API returned an unexpected user-creation response.")
+    return result
+
+
+def create_admin_school(base_url: str, api_key: str, *, name: str, federal_state_name: str) -> dict:
+    """Create an empty school through the internal Admin API."""
+    payload = {"name": name.strip(), "federalStateName": federal_state_name.strip()}
+    if not payload["name"] or not payload["federalStateName"]:
+        raise ValueError("School name and federal-state name must not be blank.")
+    result = admin_api_json_request(base_url, api_key, "/admin/schools", method="POST", body=payload)
+    if not result.get("id"):
+        raise ValueError("Admin API returned an unexpected school-creation response.")
+    return result
+
+
+def create_support_jwt(base_url: str, api_key: str, user_token: str, user_id: str) -> str:
+    """Create a support JWT for a target user, using the verified SHD user's identity."""
+    target_user_id = user_id.strip()
+    if not user_token.strip():
+        raise ValueError("A verified SHD user JWT is required to create a support JWT.")
+    if not target_user_id:
+        raise ValueError("User ID must not be blank.")
+    result = admin_api_json_request(
+        base_url,
+        api_key,
+        "/admin/authentication/support-jwt",
+        method="POST",
+        body={"userId": target_user_id},
+        user_token=user_token,
+    )
+    access_token = result.get("accessToken")
+    if not isinstance(access_token, str) or not access_token.strip():
+        raise ValueError("Admin API returned an unexpected support-JWT response.")
+    return access_token
+
+
+def list_admin_schools(base_url: str, token: str, page_size: int = 1000) -> list[dict]:
+    """List schools across the installation through the authenticated v3 endpoint."""
+    schools: list[dict] = []
+    skip = 0
+    total: int | None = None
+    while total is None or skip < total:
+        page = get_api_json(
+            base_url,
+            token,
+            "/school",
+            {"limit": str(page_size), "skip": str(skip)},
+        )
+        rows = page.get("data")
+        if not isinstance(rows, list):
+            raise ValueError("Unexpected v3 school-list response: expected a 'data' list.")
+        schools.extend(rows)
+        total = page.get("total", len(rows))
+        if not rows:
+            break
+        skip += len(rows)
+    return schools
+
+
+def get_admin_school(base_url: str, token: str, school_id: str) -> dict:
+    """Read one school by ID through the authenticated v3 endpoint."""
+    result = get_api_json(base_url, token, f"/school/id/{quote(school_id, safe='')}")
+    return result
+
+
+def update_admin_school(base_url: str, token: str, school_id: str, body: dict) -> dict:
+    """Update supported school properties through the authenticated v3 endpoint."""
+    return api_json_request(
+        base_url,
+        token,
+        f"/school/{quote(school_id, safe='')}",
+        method="PATCH",
+        body=body,
+    )
 
 
 class _TextExtractor(HTMLParser):
@@ -1896,6 +2099,23 @@ def print_schools(schools: list[dict], output_format: str) -> None:
         print(f"{school_id:<25}  {school.get('name', '')}")
 
 
+def print_school_detail(school: dict, output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(school, ensure_ascii=False, indent=2))
+        return
+    federal_state = school.get("federalState") or {}
+    county = school.get("county") or {}
+    print(f"School:             {school.get('name', '')}")
+    print(f"School ID:          {school.get('id', '')}")
+    print(f"Federal state:      {federal_state.get('name', '')}")
+    print(f"County:             {county.get('name', '')}")
+    print(f"Language:           {school.get('language', '')}")
+    print(f"Timezone:           {school.get('timezone', '')}")
+    print(f"File storage type:  {school.get('fileStorageType', '')}")
+    print(f"Features:           {', '.join(school.get('features') or [])}")
+    print(f"System IDs:         {', '.join(school.get('systemIds') or [])}")
+
+
 def print_rooms(rooms: list[dict], output_format: str) -> None:
     if output_format == "json":
         print(json.dumps(rooms, ensure_ascii=False, indent=2))
@@ -1911,6 +2131,22 @@ def print_rooms(rooms: list[dict], output_format: str) -> None:
         members = room.get("totalMembers", "")
         locked = "yes" if room.get("isLocked") else "no"
         print(f"{room_id:<25}  {str(members):>7}  {locked:<6}  {room.get('name', '')}")
+
+
+def print_courses(courses: list[dict], output_format: str) -> None:
+    if output_format == "json":
+        print(json.dumps(courses, ensure_ascii=False, indent=2))
+        return
+
+    if not courses:
+        print("No courses found.")
+        return
+    print(f"{'ID':<25}  {'Locked':<6}  {'Short title':<24}  Title")
+    print(f"{'-' * 25}  {'-' * 6}  {'-' * 24}  {'-' * 40}")
+    for course in courses:
+        course_id = course.get("id") or course.get("_id") or ""
+        locked = "yes" if course.get("isLocked") else "no"
+        print(f"{course_id:<25}  {locked:<6}  {course.get('shortTitle', ''):<24}  {course.get('title', '')}")
 
 
 def print_boards(boards: list[dict], output_format: str) -> None:
@@ -1995,6 +2231,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the access token to stdout for explicit scripting use",
     )
+    auth_parser.add_argument(
+        "--shd",
+        action="store_true",
+        help="Log in as a service account through /authentication/local-service-account",
+    )
     me_parser = subparsers.add_parser("me", help="Show the authenticated user's basic account information")
     me_parser.add_argument("--json", action="store_true", help="Print results as JSON")
 
@@ -2004,6 +2245,9 @@ def main(argv: list[str] | None = None) -> int:
     rooms_parser = subparsers.add_parser("rooms", help="List your rooms")
     rooms_parser.add_argument("--name", help="Filter rooms by a case-insensitive name substring")
     rooms_parser.add_argument("--json", action="store_true", help="Print results as JSON")
+
+    courses_parser = subparsers.add_parser("courses", help="List courses visible to you")
+    courses_parser.add_argument("--json", action="store_true", help="Print results as JSON")
 
     boards_parser = subparsers.add_parser("boards", help="List or search boards in a room")
     boards_parser.add_argument("--roomid", required=True, help="Room ID")
@@ -2094,18 +2338,172 @@ def main(argv: list[str] | None = None) -> int:
     school_options_set_parser.add_argument("--yes", action="store_true", help="Apply without interactive confirmation")
     school_options_set_parser.add_argument("--json", action="store_true", help="Print updated settings as JSON")
 
+    shd_parser = subparsers.add_parser("shd", help="Run internal SHD Admin API commands")
+    shd_commands = shd_parser.add_subparsers(dest="shd_command", required=True)
+    shd_user_parser = shd_commands.add_parser("user", help="Manage users through the internal Admin API")
+    shd_user_commands = shd_user_parser.add_subparsers(dest="shd_user_command", required=True)
+    shd_user_create_parser = shd_user_commands.add_parser("create", help="Create a user and account in a school")
+    shd_user_create_parser.add_argument("--schoolid", required=True, help="School ID where the user will be created")
+    shd_user_create_parser.add_argument("--first-name", required=True, help="User's first name")
+    shd_user_create_parser.add_argument("--last-name", required=True, help="User's last name")
+    shd_user_create_parser.add_argument("--email", required=True, help="Email address and account username")
+    shd_user_create_parser.add_argument(
+        "--role", required=True, action="append", dest="role_names",
+        help="Role name accepted by the server; repeat to assign multiple roles",
+    )
+    shd_user_create_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
+    shd_user_jwt_parser = shd_user_commands.add_parser("jwt", help="Create a support JWT for a user")
+    shd_user_jwt_parser.add_argument("--userid", required=True, help="Target user ID")
+    shd_user_jwt_output = shd_user_jwt_parser.add_mutually_exclusive_group()
+    shd_user_jwt_output.add_argument(
+        "--print-token", action="store_true", help="Print only the support JWT to stdout"
+    )
+    shd_user_jwt_output.add_argument("--json", action="store_true", help="Print the response as JSON")
+
+    shd_school_parser = shd_commands.add_parser("school", help="Manage schools using SHD access")
+    shd_school_commands = shd_school_parser.add_subparsers(dest="shd_school_command", required=True)
+    shd_school_list_parser = shd_school_commands.add_parser("list", help="List schools across the installation")
+    shd_school_list_parser.add_argument("--name", help="Filter by a case-insensitive school-name substring")
+    shd_school_list_parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    shd_school_show_parser = shd_school_commands.add_parser("show", help="Show one school by ID")
+    shd_school_show_parser.add_argument("--schoolid", required=True, help="School ID")
+    shd_school_show_parser.add_argument("--json", action="store_true", help="Print results as JSON")
+    shd_school_create_parser = shd_school_commands.add_parser("create", help="Create an empty school")
+    shd_school_create_parser.add_argument("--name", required=True, help="School name")
+    shd_school_create_parser.add_argument("--federal-state-name", required=True, help="Federal-state name")
+    shd_school_create_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
+    shd_school_update_parser = shd_school_commands.add_parser("update", help="Update supported school properties")
+    shd_school_update_parser.add_argument("--schoolid", required=True, help="School ID")
+    shd_school_update_parser.add_argument("--name", help="New school name")
+    shd_school_update_parser.add_argument("--official-school-number", help="Official school number")
+    shd_school_update_parser.add_argument("--language", choices=("de", "en", "es", "uk"), help="School language")
+    shd_school_update_parser.add_argument("--file-storage-type", choices=("awsS3",), help="File storage type")
+    school_feature_group = shd_school_update_parser.add_mutually_exclusive_group()
+    school_feature_group.add_argument(
+        "--feature", action="append", choices=(
+            "videoconference", "nextcloud", "studentVisibility", "ldapUniventionMigrationSchool",
+            "oauthProvisioningEnabled", "showOutdatedUsers", "enableLdapSyncDuringMigration", "aiTutor",
+        ), help="Set a school feature; repeat to set multiple features",
+    )
+    school_feature_group.add_argument("--clear-features", action="store_true", help="Remove all school features")
+    shd_school_update_parser.add_argument("--countyid", help="County ID")
+    shd_school_update_parser.add_argument(
+        "--student-listing", choices=("enabled", "disabled"),
+        help="Allow teachers to see the full student list",
+    )
+    shd_school_update_parser.add_argument(
+        "--student-team-creation", choices=("enabled", "disabled"),
+        help="Allow students to create teams",
+    )
+    shd_school_update_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
+
     args = parser.parse_args(argv)
     try:
-        token = (
-            get_admin_token(args.api_url, prompt=True)
-            if args.command == "school"
-            else get_schoolcloud_token(
+        shd_key_operation = args.command == "shd" and (
+            (args.shd_command == "user" and args.shd_user_command == "create")
+            or (args.shd_command == "school" and args.shd_school_command == "create")
+        )
+        if shd_key_operation:
+            token = ""
+        elif args.command == "shd":
+            token = get_shd_token(args.api_url, prompt=True)
+        elif args.command == "school":
+            token = get_admin_token(args.api_url, prompt=True)
+        else:
+            token = get_schoolcloud_token(
                 args.api_url,
                 username=getattr(args, "username", None),
                 prompt=True,
+                method_override="local-service-account" if getattr(args, "shd", False) else None,
+                force_login=getattr(args, "shd", False),
+                token_env="SCHOOLCLOUD_SHD_TOKEN" if getattr(args, "shd", False) else "SCHOOLCLOUD_TOKEN",
             )
-        )
-        if args.command == "auth":
+        if args.command == "shd" and not shd_key_operation:
+            token = require_shd_user(args.api_url, token)
+        if args.command == "shd" and args.shd_command == "user" and args.shd_user_command == "create":
+            admin_api_base = os.environ.get("SVS_ADMIN_API_URL", "http://localhost:4030/admin/api").strip()
+            admin_api_key = os.environ.get("SCHOOLCLOUD_ADMIN_API_KEY", "")
+            result = create_admin_user(
+                admin_api_base,
+                admin_api_key,
+                school_id=args.schoolid,
+                first_name=args.first_name,
+                last_name=args.last_name,
+                email=args.email,
+                role_names=args.role_names,
+            )
+            if args.json:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print("Created user and account through the SHD Admin API.")
+                print(f"User ID:         {result.get('userId', '')}")
+                print(f"Account ID:      {result.get('accountId', '')}")
+                print(f"Username:        {result.get('username', '')}")
+                print(f"Initial password: {result.get('initialPassword', '')}")
+                print("Treat the initial password as a secret.")
+        elif args.command == "shd" and args.shd_command == "user" and args.shd_user_command == "jwt":
+            admin_api_base = os.environ.get("SVS_ADMIN_API_URL", "http://localhost:4030/admin/api").strip()
+            admin_api_key = os.environ.get("SCHOOLCLOUD_ADMIN_API_KEY", "")
+            access_token = create_support_jwt(admin_api_base, admin_api_key, token, args.userid)
+            if args.print_token:
+                print(access_token)
+            elif args.json:
+                print(json.dumps({"userId": args.userid, "accessToken": access_token}, ensure_ascii=False, indent=2))
+            else:
+                print(f"Created a support JWT for user {args.userid}.")
+                print("Use --print-token to emit the JWT, or --json to include it in JSON output.")
+        elif args.command == "shd" and args.shd_command == "school":
+            if args.shd_school_command == "create":
+                admin_api_base = os.environ.get("SVS_ADMIN_API_URL", "http://localhost:4030/admin/api").strip()
+                admin_api_key = os.environ.get("SCHOOLCLOUD_ADMIN_API_KEY", "")
+                result = create_admin_school(
+                    admin_api_base,
+                    admin_api_key,
+                    name=args.name,
+                    federal_state_name=args.federal_state_name,
+                )
+                if args.json:
+                    print(json.dumps(result, ensure_ascii=False, indent=2))
+                else:
+                    print(f"Created school {result.get('name', args.name)} (ID: {result.get('id', '')}).")
+            elif args.shd_school_command == "list":
+                schools = list_admin_schools(args.api_url, token)
+                if args.name is not None:
+                    query = args.name.strip().casefold()
+                    if not query:
+                        raise ValueError("School-name filter must contain at least one non-space character.")
+                    schools = [school for school in schools if query in str(school.get("name", "")).casefold()]
+                print_schools(schools, "json" if args.json else "table")
+            elif args.shd_school_command == "show":
+                school = get_admin_school(args.api_url, token, args.schoolid)
+                print_school_detail(school, "json" if args.json else "table")
+            else:
+                requested: dict[str, object] = {}
+                for argument, key in (
+                    ("name", "name"),
+                    ("official_school_number", "officialSchoolNumber"),
+                    ("language", "language"),
+                    ("file_storage_type", "fileStorageType"),
+                    ("countyid", "countyId"),
+                ):
+                    value = getattr(args, argument)
+                    if value is not None:
+                        requested[key] = value
+                if args.feature is not None:
+                    requested["features"] = args.feature
+                elif args.clear_features:
+                    requested["features"] = []
+                if args.student_listing is not None:
+                    requested["permissions"] = {
+                        "teacher": {"STUDENT_LIST": args.student_listing == "enabled"}
+                    }
+                if args.student_team_creation is not None:
+                    requested["enableStudentTeamCreation"] = args.student_team_creation == "enabled"
+                if not requested:
+                    raise ValueError("Set at least one school property to update.")
+                updated = update_admin_school(args.api_url, token, args.schoolid, requested)
+                print_school_detail(updated, "json" if args.json else "table")
+        elif args.command == "auth":
             info = get_me(args.api_url, token)
             if args.print_token:
                 print(token.removeprefix("Bearer ").strip())
@@ -2211,6 +2609,9 @@ def main(argv: list[str] | None = None) -> int:
                     if name_query in str(room.get("name", "")).casefold()
                 ]
             print_rooms(rooms, "json" if args.json else "table")
+        elif args.command == "courses":
+            courses = list_courses(args.api_url, token, show_progress=not args.json)
+            print_courses(courses, "json" if args.json else "table")
         elif args.command == "boards":
             name_query = None
             if args.name is not None:
@@ -2392,6 +2793,10 @@ def main(argv: list[str] | None = None) -> int:
         detail = error.read().decode("utf-8", errors="replace").strip()
         if args.command == "board" and getattr(args, "board_command", None) == "create-content":
             print(f"Remote API request failed ({error.code}): {detail or error.reason}", file=sys.stderr)
+        elif args.command == "shd" and shd_key_operation:
+            print(f"SHD Admin API request failed ({error.code}): {detail or error.reason}", file=sys.stderr)
+        elif args.command == "shd":
+            print(f"SHD v3 API request failed ({error.code}): {detail or error.reason}", file=sys.stderr)
         else:
             print(f"API request failed ({error.code}): {detail or error.reason}", file=sys.stderr)
         return 1
@@ -2400,6 +2805,10 @@ def main(argv: list[str] | None = None) -> int:
             write_progress("")
         if args.command == "board" and getattr(args, "board_command", None) == "create-content":
             print(f"Could not generate or apply board content: {error}", file=sys.stderr)
+        elif args.command == "shd" and shd_key_operation:
+            print(f"Could not call the SHD Admin API: {error}", file=sys.stderr)
+        elif args.command == "shd":
+            print(f"Could not fetch or update SHD school data: {error}", file=sys.stderr)
         else:
             print(f"Could not fetch or search SchoolCloud data: {error}", file=sys.stderr)
         return 1

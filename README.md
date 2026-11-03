@@ -30,7 +30,7 @@ The server exposes these login routes under `/api/v3/authentication`:
 
 Successful login returns an access token (JWT) used as a Bearer token for API requests. Every command now uses the same token resolver: it reuses `SCHOOLCLOUD_TOKEN` while valid, otherwise logs in with `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`, or prompts for credentials when running interactively. Tokens obtained by logging in stay in process memory; the CLI does not save passwords or tokens to disk.
 
-Run `auth` to log in or inspect the current account. Passwords are prompted without echo when no password is injected. `--print-token` is available for deliberate shell scripting; it writes only the token to stdout, so treat that output as secret. The login request uses the verified `/api/v3/authentication/local` route by default. Set `SCHOOLCLOUD_AUTH_METHOD=local-service-account` for a local service account. LDAP login is also supported with `SCHOOLCLOUD_AUTH_METHOD=ldap`, `SCHOOLCLOUD_SCHOOL_ID`, and `SCHOOLCLOUD_SYSTEM_ID`. OAuth/SSO providers need their provider-specific flow and cannot be assumed to accept a username and password through this CLI login. School administration prefers the separate `SVS_ADMIN_TOKEN` when set; otherwise it uses the regular token resolver. The server still checks the token's permissions on every request.
+Run `auth` to log in or inspect the current account. Passwords are prompted without echo when no password is injected. `--print-token` is available for deliberate shell scripting; it writes only the token to stdout, so treat that output as secret. The login request uses the verified `/api/v3/authentication/local` route by default. Use `auth --shd` to force a fresh login through `/api/v3/authentication/local-service-account`; it prints or displays the result but does not save the token. `auth --shd --print-token` can be used to capture the JWT into `SCHOOLCLOUD_SHD_TOKEN`. LDAP login is also supported with `SCHOOLCLOUD_AUTH_METHOD=ldap`, `SCHOOLCLOUD_SCHOOL_ID`, and `SCHOOLCLOUD_SYSTEM_ID`. OAuth/SSO providers need their provider-specific flow and cannot be assumed to accept a username and password through this CLI login. School administration prefers the separate `SVS_ADMIN_TOKEN` when set; otherwise it uses the regular token resolver. The server still checks the token's permissions on every request.
 
 Copy `.env.example` to `.env` and set the values for your installation. Keep `.env` private; it is ignored by Git. Load it into the current shell before running commands:
 
@@ -64,6 +64,8 @@ python3 svs_cli.py board capabilities --boardid BOARD_ID
 python3 svs_cli.py school systems --schoolid SCHOOL_ID
 python3 svs_cli.py school system-options get --schoolid SCHOOL_ID
 python3 svs_cli.py school system-options set --schoolid SCHOOL_ID --classes enabled
+python3 svs_cli.py shd user create --schoolid SCHOOL_ID --first-name Ada --last-name Beispiel --email ada@example.org --role student
+python3 svs_cli.py shd user jwt --userid USER_ID --print-token
 python3 svs_cli.py board create-link-card --boardid BOARD_ID --url "https://example.org/article"
 python3 svs_cli.py board create-file-card --boardid BOARD_ID --url "https://upload.wikimedia.org/.../image.jpg"
 python3 svs_cli.py board create-file-card --boardid BOARD_ID --file ./image.jpg
@@ -89,7 +91,53 @@ svs school system-options set --schoolid SCHOOL_ID --classes enabled
 
 The installed command is `svs`; `svs-cli` is also provided as an alias.
 
+### Internal SHD Admin API
+
+`svs shd user create` and `svs shd school create` call the separate, internal Admin API. Configure `SVS_ADMIN_API_URL` (default `http://localhost:4030/admin/api`) and `SCHOOLCLOUD_ADMIN_API_KEY`; the CLI sends the key as `X-API-KEY`. These create commands do not require a SchoolCloud JWT. If the Admin API is only reachable inside the cluster, open a Kubernetes port-forward and point `SVS_ADMIN_API_URL` at its local address. The URL is the base ending in `/admin/api`; the CLI appends the Admin API's `/v1` prefix.
+
+`svs shd user create` calls `POST /admin/api/v1/admin/users` with a school ID, first and last name, email, and one or more server role names. The endpoint creates both the user and account, uses the email as the username, activates the account, and returns a generated initial password. This operation does not send a registration email. The command prints that password in table output; `--json` also includes it in the response, so protect captured output. The API key is powerful: only use role names and schools you are authorized to administer. For example:
+
+```sh
+export SVS_ADMIN_API_URL="http://localhost:4030/admin/api"
+export SCHOOLCLOUD_ADMIN_API_KEY="your-internal-admin-api-key"
+svs shd user create --schoolid SCHOOL_ID --first-name Ada --last-name Beispiel \
+  --email ada@example.org --role student
+```
+
+Repeat `--role` to assign multiple roles. The endpoint validates role names against those supported by the server. Use HTTPS for a remote Admin API; plain HTTP is accepted only for localhost addresses.
+
+`svs shd user jwt --userid USER_ID` requests a support JWT for that user from `POST /admin/api/v1/admin/authentication/support-jwt`. This command sends both the Admin API key and the verified SHD user's JWT. Set `SCHOOLCLOUD_SHD_TOKEN`, or provide SHD service-account credentials in `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`; the CLI checks for the `superhero` role, and the server checks `CREATE_SUPPORT_JWT` and `CAN_EXECUTE_INSTANCE_OPERATIONS` permissions. The JWT is only printed when explicitly requested with `--print-token` or `--json`; treat it as a secret.
+
+```sh
+svs shd user jwt --userid USER_ID
+svs shd user jwt --userid USER_ID --print-token
+```
+
+The `shd school` commands use the SHD user's JWT for v3 list, show, and update operations, and the Admin API key for school creation:
+
+```sh
+svs shd school list
+svs shd school list --name "gymnasium"
+svs shd school show --schoolid SCHOOL_ID
+svs shd school update --schoolid SCHOOL_ID --name "New name"
+svs shd school update --schoolid SCHOOL_ID --feature videoconference --feature nextcloud
+svs shd school create --name "New school" --federal-state-name "Niedersachsen"
+```
+
+List uses `GET /api/v3/school` and can search across the installation. Show and update use `/api/v3/school/id/{schoolId}` and `/api/v3/school/{schoolId}`; the server enforces school authorization, and an SHD account needs the corresponding permissions. Update supports name, official school number, language, file storage type, features, county, student-list visibility, and student team creation. Create uses `POST /admin/api/v1/admin/schools` and makes an empty school. The CLI does not offer school deletion because the available delete route is legacy.
+
+For v3 `shd school` commands, the CLI uses `SCHOOLCLOUD_SHD_TOKEN` if set; otherwise it logs in through the service-account endpoint using `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`. It checks that the JWT has the `superhero` role before making requests. To capture a fresh SHD JWT without replacing `SCHOOLCLOUD_TOKEN`:
+
+```sh
+SCHOOLCLOUD_SHD_TOKEN="$(python3 svs_cli.py auth --shd --username SHD_USERNAME --print-token)" &&
+[ -n "$SCHOOLCLOUD_SHD_TOKEN" ] && export SCHOOLCLOUD_SHD_TOKEN
+```
+
+School creation only needs the Admin API URL and key.
+
 `rooms` calls authenticated `GET /api/v3/rooms` and lists rooms available to the current user. Add `--name` to filter those results by a case-insensitive name substring; the same filter applies to table and JSON output. A JWT is required; the server returns the user's room arrangement and the operations they are allowed to perform in each room.
+
+`courses` calls authenticated `GET /api/v3/courses` and lists courses visible to the current user, fetching all pages. The server scopes this list to the authenticated user and school. It is separate from `GET /api/v3/course-info`, which is intended for school course administration and has status/sort filters. The v3 API supports course creation, course/group synchronization, user permissions, and common-cartridge metadata, but currently has no v3 route to add a student directly to a course. Course participation is group-based; adding members to a room is a separate operation and does not enroll them in a course.
 
 `me` calls authenticated `GET /api/v3/me` and displays the identity, school, roles, language, and account ID associated with the current JWT. Add `--json` to print the complete response, including permissions and preferences. The token itself is never displayed; `/me` identifies the authenticated account but does not return JWT expiry details.
 
