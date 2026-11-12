@@ -2348,14 +2348,34 @@ def main(argv: list[str] | None = None) -> int:
     shd_commands = shd_parser.add_subparsers(dest="shd_command", required=True)
     shd_user_parser = shd_commands.add_parser("user", help="Manage users through the internal Admin API")
     shd_user_commands = shd_user_parser.add_subparsers(dest="shd_user_command", required=True)
-    shd_user_create_parser = shd_user_commands.add_parser("create", help="Create a user and account in a school")
+    shd_user_create_parser = shd_user_commands.add_parser(
+        "create",
+        help="Create a user and account in a school",
+        description="Create an active user and account through the internal Admin API.",
+        epilog=(
+            "Ingredients:\n"
+            "  SCHOOLCLOUD_ADMIN_API_KEY must contain the Admin API X-API-KEY credential.\n"
+            "  SVS_ADMIN_API_URL optionally sets the internal Admin API base URL\n"
+            "  (default: http://localhost:4030/admin/api). The API must be reachable;\n"
+            "  use a Kubernetes port-forward if it is only available inside the cluster.\n"
+            "  No SchoolCloud or SHD user JWT is required for this command.\n"
+            "\n"
+            "Kubernetes examples (using the current kubectl context):\n"
+            "  export SCHOOLCLOUD_ADMIN_API_KEY=\"$(kubectl -n main get secret shd-secret -o jsonpath='{.data.ADMIN_API_KEY}' | base64 -d)\"\n"
+            "  kubectl -n main port-forward service/api-admin-svc 4030:4030\n"
+            "\n"
+            "Keep the port-forward running in another terminal. The default\n"
+            "SVS_ADMIN_API_URL then points to its localhost endpoint."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     shd_user_create_parser.add_argument("--schoolid", required=True, help="School ID where the user will be created")
     shd_user_create_parser.add_argument("--first-name", required=True, help="User's first name")
     shd_user_create_parser.add_argument("--last-name", required=True, help="User's last name")
     shd_user_create_parser.add_argument("--email", required=True, help="Email address and account username")
     shd_user_create_parser.add_argument(
         "--role", required=True, action="append", dest="role_names",
-        help="Role name accepted by the server; repeat to assign multiple roles",
+        metavar="ROLE", help="Role name or role ID; repeat for multiple roles",
     )
     shd_user_create_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
     shd_user_jwt_parser = shd_user_commands.add_parser(

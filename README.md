@@ -117,7 +117,7 @@ Start a new zsh after enabling the hook. The CLI still works normally if argcomp
 
 `svs shd user create` and `svs shd school create` call the separate, internal Admin API. Configure `SVS_ADMIN_API_URL` (default `http://localhost:4030/admin/api`) and `SCHOOLCLOUD_ADMIN_API_KEY`; the CLI sends the key as `X-API-KEY`. These create commands do not require a SchoolCloud JWT. If the Admin API is only reachable inside the cluster, open a Kubernetes port-forward and point `SVS_ADMIN_API_URL` at its local address. The URL is the base ending in `/admin/api`; the CLI appends the Admin API's `/v1` prefix.
 
-`svs shd user create` calls `POST /admin/api/v1/admin/users` with a school ID, first and last name, email, and one or more server role names. The endpoint creates both the user and account, uses the email as the username, activates the account, and returns a generated initial password. This operation does not send a registration email. The command prints that password in table output; `--json` also includes it in the response, so protect captured output. The API key is powerful: only use role names and schools you are authorized to administer. For example:
+`svs shd user create` calls `POST /admin/api/v1/admin/users` with a school ID, first and last name, email, and one or more role names or role IDs. The CLI sends roles as an array, including when only one role is given, for compatibility with deployed Admin API versions. The endpoint creates both the user and account, uses the email as the username, activates the account, and returns a generated initial password. This operation does not send a registration email. The command prints that password in table output; `--json` also includes it in the response, so protect captured output. The API key is powerful: only use role names/IDs and schools you are authorized to administer. For example:
 
 ```sh
 export SVS_ADMIN_API_URL="http://localhost:4030/admin/api"
@@ -126,7 +126,7 @@ svs shd user create --schoolid SCHOOL_ID --first-name Ada --last-name Beispiel \
   --email ada@example.org --role student
 ```
 
-Repeat `--role` to assign multiple roles. The endpoint validates role names against those supported by the server. Use HTTPS for a remote Admin API; plain HTTP is accepted only for localhost addresses.
+Repeat `--role` to assign multiple roles. For example, use `--role student --role teacher` or pass the corresponding role IDs. Use HTTPS for a remote Admin API; plain HTTP is accepted only for localhost addresses.
 
 #### Prerequisites for support JWT creation
 
