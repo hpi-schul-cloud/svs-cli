@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 codegen = ["openapi-python-client>=0.27,<1"]
+completion = ["argcomplete>=3.6,<4"]
 
 [project.scripts]
 svs = "svs_cli:main"

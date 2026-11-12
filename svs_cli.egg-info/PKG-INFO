@@ -1,0 +1,11 @@
+Metadata-Version: 2.4
+Name: svs-cli
+Version: 0.1.0
+Summary: SVS API command line tools
+Requires-Python: >=3.10
+License-File: LICENSE
+Provides-Extra: codegen
+Requires-Dist: openapi-python-client<1,>=0.27; extra == "codegen"
+Provides-Extra: completion
+Requires-Dist: argcomplete<4,>=3.6; extra == "completion"
+Dynamic: license-file

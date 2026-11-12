@@ -1,4 +1,5 @@
 """API-only command line tools for SVS."""
+# PYTHON_ARGCOMPLETE_OK
 
 from __future__ import annotations
 
@@ -19,6 +20,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, unquote, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+
+try:
+    import argcomplete
+except ImportError:  # Completion support is optional.
+    argcomplete = None
 
 
 def api_url(base_url: str, path: str, params: dict[str, str]) -> str:
@@ -2352,7 +2358,23 @@ def main(argv: list[str] | None = None) -> int:
         help="Role name accepted by the server; repeat to assign multiple roles",
     )
     shd_user_create_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
-    shd_user_jwt_parser = shd_user_commands.add_parser("jwt", help="Create a support JWT for a user")
+    shd_user_jwt_parser = shd_user_commands.add_parser(
+        "jwt",
+        help="Create a support JWT for a user",
+        description="Create a support JWT for a target user using the authenticated SHD user's identity.",
+        epilog=(
+            "Prerequisites:\n"
+            "  SCHOOLCLOUD_API_URL sets the backend used for login and identity checks\n"
+            "  (default: http://localhost:3030/api).\n"
+            "  SVS_ADMIN_API_URL must point to the internal Admin API base ending in /admin/api.\n"
+            "  SCHOOLCLOUD_ADMIN_API_KEY must contain its X-API-KEY credential.\n"
+            "  SCHOOLCLOUD_SHD_TOKEN must be a valid superhero user's JWT, or provide\n"
+            "  SCHOOLCLOUD_USERNAME and SCHOOLCLOUD_PASSWORD for a service-account login.\n"
+            "  The authenticated user also needs CREATE_SUPPORT_JWT and\n"
+            "  CAN_EXECUTE_INSTANCE_OPERATIONS permissions."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     shd_user_jwt_parser.add_argument("--userid", required=True, help="Target user ID")
     shd_user_jwt_output = shd_user_jwt_parser.add_mutually_exclusive_group()
     shd_user_jwt_output.add_argument(
@@ -2396,6 +2418,9 @@ def main(argv: list[str] | None = None) -> int:
         help="Allow students to create teams",
     )
     shd_school_update_parser.add_argument("--json", action="store_true", help="Print the response as JSON")
+
+    if argcomplete is not None:
+        argcomplete.autocomplete(parser)
 
     args = parser.parse_args(argv)
     try:

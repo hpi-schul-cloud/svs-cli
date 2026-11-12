@@ -1,0 +1,10 @@
+LICENSE
+README.md
+pyproject.toml
+svs_cli.py
+svs_cli.egg-info/PKG-INFO
+svs_cli.egg-info/SOURCES.txt
+svs_cli.egg-info/dependency_links.txt
+svs_cli.egg-info/entry_points.txt
+svs_cli.egg-info/requires.txt
+svs_cli.egg-info/top_level.txt

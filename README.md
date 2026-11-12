@@ -91,6 +91,28 @@ svs school system-options set --schoolid SCHOOL_ID --classes enabled
 
 The installed command is `svs`; `svs-cli` is also provided as an alias.
 
+### Zsh tab completion
+
+Completion is optional. Install SVS CLI with its completion extra:
+
+```sh
+python3 -m pip install -e '.[completion]'
+```
+
+For the installed `svs` command, add this line to `~/.zshrc`, then restart zsh or reload the file with `source ~/.zshrc`:
+
+```sh
+eval "$(register-python-argcomplete --shell zsh svs)"
+```
+
+You can then type `svs <TAB>` or `svs shd user <TAB>` to complete subcommands and options. To complete the source invocation `python3 svs_cli.py <TAB>`, enable argcomplete's global completion hook once from the same Python environment:
+
+```sh
+activate-global-python-argcomplete
+```
+
+Start a new zsh after enabling the hook. The CLI still works normally if argcomplete is not installed; tab completion is the optional part.
+
 ### Internal SHD Admin API
 
 `svs shd user create` and `svs shd school create` call the separate, internal Admin API. Configure `SVS_ADMIN_API_URL` (default `http://localhost:4030/admin/api`) and `SCHOOLCLOUD_ADMIN_API_KEY`; the CLI sends the key as `X-API-KEY`. These create commands do not require a SchoolCloud JWT. If the Admin API is only reachable inside the cluster, open a Kubernetes port-forward and point `SVS_ADMIN_API_URL` at its local address. The URL is the base ending in `/admin/api`; the CLI appends the Admin API's `/v1` prefix.
@@ -106,7 +128,18 @@ svs shd user create --schoolid SCHOOL_ID --first-name Ada --last-name Beispiel \
 
 Repeat `--role` to assign multiple roles. The endpoint validates role names against those supported by the server. Use HTTPS for a remote Admin API; plain HTTP is accepted only for localhost addresses.
 
-`svs shd user jwt --userid USER_ID` requests a support JWT for that user from `POST /admin/api/v1/admin/authentication/support-jwt`. This command sends both the Admin API key and the verified SHD user's JWT. Set `SCHOOLCLOUD_SHD_TOKEN`, or provide SHD service-account credentials in `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`; the CLI checks for the `superhero` role, and the server checks `CREATE_SUPPORT_JWT` and `CAN_EXECUTE_INSTANCE_OPERATIONS` permissions. The JWT is only printed when explicitly requested with `--print-token` or `--json`; treat it as a secret.
+#### Prerequisites for support JWT creation
+
+Before running `svs shd user jwt --userid USER_ID`, configure these values and authenticate as an authorized SHD user:
+
+| Setting | What it provides |
+| --- | --- |
+| `SCHOOLCLOUD_API_URL` | SchoolCloud API base used for login and checking the SHD user's identity; defaults to `http://localhost:3030/api`. |
+| `SVS_ADMIN_API_URL` | Internal Admin API base ending in `/admin/api`; defaults to `http://localhost:4030/admin/api`. |
+| `SCHOOLCLOUD_ADMIN_API_KEY` | Admin API `X-API-KEY` credential. |
+| `SCHOOLCLOUD_SHD_TOKEN` | A current JWT for a superhero user. If unset, the CLI logs in through `/api/v3/authentication/local-service-account` using `SCHOOLCLOUD_USERNAME` and `SCHOOLCLOUD_PASSWORD`. |
+
+The server requires the authenticated user to have `CREATE_SUPPORT_JWT` and `CAN_EXECUTE_INSTANCE_OPERATIONS`. The CLI checks for the `superhero` role before calling the Admin API. The resulting support JWT is only printed with `--print-token` or `--json`; treat it as a secret.
 
 ```sh
 svs shd user jwt --userid USER_ID

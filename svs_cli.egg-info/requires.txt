@@ -1,0 +1,6 @@
+
+[codegen]
+openapi-python-client<1,>=0.27
+
+[completion]
+argcomplete<4,>=3.6
